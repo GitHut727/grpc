@@ -1,47 +1,4 @@
 
-// C++
-void LogReactor::MaybeStartWrite() {
-  Message localMsg; // tipo substitua por tipo real
-
-  {
-    std::lock_guard lock{m_mutex};
-
-    if (m_writeInProgress) {
-      return;
-    }
-
-    if (m_writeQueue.empty()) {
-      if (m_dataComplete) {
-        const grpc::Status status =
-            m_cancelled ? grpc::Status::CANCELLED : grpc::Status::OK;
-
-        // libere o lock antes de chamar Finish para evitar deadlocks
-        // (copiar flags locais se necessário)
-        lock.~lock_guard(); // NÃO use isto em produção — mostrado conceptualmente
-        // Em C++ real, reestruture para sair do escopo do lock antes de Finish.
-        this->Finish(status);
-        return;
-      }
-
-      if (m_error) {
-        this->Finish(grpc::Status(grpc::StatusCode::INTERNAL, ""));
-        return;
-      }
-    }
-
-    // extrair a mensagem sob lock
-    localMsg = std::move(m_writeQueue.front());
-    m_writeQueue.pop();
-
-    // marcar que uma escrita vai ocorrer
-    m_writeInProgress = true;
-  } // lock liberado aqui (escopo)
-
-  // Chamar StartWrite fora do lock. Garantir que StartWrite não mantenha ponteiro
-  // para localMsg além de seu escopo, ou usar m_currentMessage se precisar manter.
-  StartWrite(&localMsg);
-}
-
 # run in a throwaway Ubuntu container (no persistent changes to your host)
 docker run --rm -it -v /tmp:/tmp ubuntu:24.04 bash -lc "apt update -y && apt install -y curl ca-certificates && cd /tmp && bash ./install.sh --help" gRPC – An RPC library and framework
 
