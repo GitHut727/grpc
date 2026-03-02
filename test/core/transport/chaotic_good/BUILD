@@ -157,7 +157,6 @@ grpc_cc_library(
         "//src/core:race",
         "//src/core:try_seq",
         "//test/core/promise:poll_matcher",
-        "@com_google_protobuf//:protobuf",
     ],
 )
 
@@ -246,6 +245,7 @@ grpc_cc_test(
         "//:grpc",
         "//:grpc++",
         "//:grpc_public_hdrs",
+        "//:grpc_security_base",
         "//:parse_address",
         "//:server",
         "//:uri",
@@ -256,7 +256,9 @@ grpc_cc_test(
         "//src/core:default_event_engine",
         "//src/core:endpoint_transport",
         "//src/core:event_engine_tcp_socket_utils",
+        "//src/core:experiments",
         "//src/core:grpc_check",
+        "//src/core:grpc_fake_credentials",
         "//src/core:notification",
         "//src/core:resource_quota",
         "//src/core:time",
