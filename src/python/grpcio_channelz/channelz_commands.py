@@ -21,7 +21,7 @@ import setuptools
 ROOT_DIR = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
 GRPC_ROOT_ABS_PATH = os.path.join(ROOT_DIR, "../../..")
 ROOT_REL_DIR = os.path.relpath(ROOT_DIR, start=GRPC_ROOT_ABS_PATH)
-CHANNELZ_PROTO = "src/proto/grpc/channelz/channelz.proto"
+CHANNELZ_PROTO = "third_party/grpc-proto/grpc/channelz/v1/channelz.proto"
 LICENSE = "./LICENSE"
 
 
@@ -65,4 +65,4 @@ class BuildPackageProtos(setuptools.Command):
         from grpc_tools import command
 
         # find and build all protos in the current package
-        command.build_package_protos(ROOT_REL_DIR)
+        command.build_package_protos(ROOT_REL_DIR, strict_mode=True)

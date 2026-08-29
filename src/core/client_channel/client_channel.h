@@ -22,9 +22,9 @@
 #include "src/core/call/metadata.h"
 #include "src/core/client_channel/client_channel_factory.h"
 #include "src/core/client_channel/config_selector.h"
+#include "src/core/client_channel/retry_throttle.h"
 #include "src/core/client_channel/subchannel.h"
 #include "src/core/ext/filters/channel_idle/idle_filter_state.h"
-#include "src/core/filter/blackboard.h"
 #include "src/core/lib/promise/observable.h"
 #include "src/core/lib/surface/channel.h"
 #include "src/core/load_balancing/lb_policy.h"
@@ -75,7 +75,9 @@ class ClientChannel : public Channel {
                         grpc_completion_queue* cq,
                         grpc_pollset_set* /*pollset_set_alternative*/,
                         Slice path, std::optional<Slice> authority,
-                        Timestamp deadline, bool registered_method) override;
+                        Timestamp deadline, bool registered_method,
+                        std::optional<absl::FunctionRef<void(Arena*)>>
+                            arena_init_function) override;
 
   void StartCall(UnstartedCallHandler unstarted_handler) override;
 
@@ -166,7 +168,7 @@ class ClientChannel : public Channel {
 
   // Applies service config settings from config_selector to the call.
   // May modify call context and client_initial_metadata.
-  absl::Status ApplyServiceConfigToCall(
+  absl::StatusOr<RefCountedPtr<const FilterChain>> ApplyServiceConfigToCall(
       ConfigSelector& config_selector,
       ClientMetadata& client_initial_metadata) const;
 
@@ -192,11 +194,8 @@ class ClientChannel : public Channel {
   //
   // Fields related to name resolution.
   //
-  struct ResolverDataForCalls {
-    RefCountedPtr<ConfigSelector> config_selector;
-    RefCountedPtr<UnstartedCallDestination> call_destination;
-  };
-  Observable<absl::StatusOr<ResolverDataForCalls>> resolver_data_for_calls_;
+  Observable<absl::StatusOr<RefCountedPtr<ConfigSelector>>>
+      resolver_data_for_calls_;
 
   //
   // Fields related to LB picks.
@@ -216,7 +215,7 @@ class ClientChannel : public Channel {
       ABSL_GUARDED_BY(*work_serializer_);
   RefCountedPtr<ConfigSelector> saved_config_selector_
       ABSL_GUARDED_BY(*work_serializer_);
-  RefCountedPtr<const Blackboard> blackboard_
+  RetryThrottlerChannelArgsUpdater retry_throttler_updater_
       ABSL_GUARDED_BY(*work_serializer_);
   OrphanablePtr<LoadBalancingPolicy> lb_policy_
       ABSL_GUARDED_BY(*work_serializer_);

@@ -178,7 +178,6 @@ class Server : public ServerInterface, private internal::GrpcLibrary {
          int min_pollers, int max_pollers, int sync_cq_timeout_msec,
          std::vector<std::shared_ptr<internal::ExternalConnectionAcceptorImpl>>
              acceptors,
-         grpc_server_config_fetcher* server_config_fetcher = nullptr,
          grpc_resource_quota* server_rq = nullptr,
          std::vector<
              std::unique_ptr<experimental::ServerInterceptorFactoryInterface>>
@@ -247,9 +246,6 @@ class Server : public ServerInterface, private internal::GrpcLibrary {
       std::unique_ptr<ContextAllocator> context_allocator) {
     context_allocator_ = std::move(context_allocator);
   }
-
-  void PerformOpsOnCall(internal::CallOpSetInterface* ops,
-                        internal::Call* call) override;
 
   void ShutdownInternal(gpr_timespec deadline)
       ABSL_LOCKS_EXCLUDED(mu_) override;

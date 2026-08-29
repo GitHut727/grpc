@@ -24,6 +24,7 @@
 #include <grpcpp/support/byte_buffer.h>
 #include <grpcpp/support/sync_stream.h>
 
+#include "absl/base/optimization.h"
 #include "absl/log/absl_check.h"
 
 namespace grpc {
@@ -72,12 +73,13 @@ void UnaryRunHandlerHelper(const MethodHandler::HandlerParameter& param,
     status = ops.SendMessagePtr(rsp, param.server_context->memory_allocator());
   }
   ops.ServerSendStatus(&param.server_context->trailing_metadata_, status);
-  param.call->PerformOps(&ops);
+  ops.FillOps(param.call);
   param.call->cq()->Pluck(&ops);
 }
 
 /// A helper function with reduced templating to do deserializing.
-
+/// If the deserialization fails, the request object will not be destroyed.
+/// It is the responsibility of the caller to destroy the request object.
 template <class RequestType>
 void* UnaryDeserializeHelper(grpc_byte_buffer* req, grpc::Status* status,
                              RequestType* request) {
@@ -88,7 +90,6 @@ void* UnaryDeserializeHelper(grpc_byte_buffer* req, grpc::Status* status,
   if (status->ok()) {
     return request;
   }
-  request->~RequestType();
   return nullptr;
 }
 
@@ -123,8 +124,12 @@ class RpcMethodHandler : public grpc::internal::MethodHandler {
                     grpc::Status* status, void** /*handler_data*/) final {
     auto* request =
         new (grpc_call_arena_alloc(call, sizeof(RequestType))) RequestType;
-    return UnaryDeserializeHelper(req, status,
-                                  static_cast<BaseRequestType*>(request));
+    void* result = UnaryDeserializeHelper(
+        req, status, static_cast<BaseRequestType*>(request));
+    if (ABSL_PREDICT_FALSE(result == nullptr)) {
+      request->~RequestType();
+    }
+    return result;
   }
 
  private:
@@ -174,7 +179,7 @@ class ClientStreamingHandler : public grpc::internal::MethodHandler {
           ops.SendMessagePtr(&rsp, param.server_context->memory_allocator());
     }
     ops.ServerSendStatus(&param.server_context->trailing_metadata_, status);
-    param.call->PerformOps(&ops);
+    ops.FillOps(param.call);
     param.call->cq()->Pluck(&ops);
   }
 
@@ -220,7 +225,7 @@ class ServerStreamingHandler : public grpc::internal::MethodHandler {
       }
     }
     ops.ServerSendStatus(&param.server_context->trailing_metadata_, status);
-    param.call->PerformOps(&ops);
+    ops.FillOps(param.call);
     if (param.server_context->has_pending_ops_) {
       param.call->cq()->Pluck(&param.server_context->pending_ops_);
     }
@@ -288,7 +293,7 @@ class TemplatedBidiStreamingHandler : public grpc::internal::MethodHandler {
       }
     }
     ops.ServerSendStatus(&param.server_context->trailing_metadata_, status);
-    param.call->PerformOps(&ops);
+    ops.FillOps(param.call);
     if (param.server_context->has_pending_ops_) {
       param.call->cq()->Pluck(&param.server_context->pending_ops_);
     }
@@ -367,7 +372,7 @@ class ErrorMethodHandler : public grpc::internal::MethodHandler {
       if (context->compression_level_set()) {
         ops->set_compression_level(context->compression_level());
       }
-      context->sent_initial_metadata_ = true;
+      context->MarkInitialMetadataSent();
     }
     ops->ServerSendStatus(&context->trailing_metadata_, status);
   }
@@ -377,7 +382,7 @@ class ErrorMethodHandler : public grpc::internal::MethodHandler {
                               grpc::internal::CallOpServerSendStatus>
         ops;
     FillOps(param.server_context, message_, &ops);
-    param.call->PerformOps(&ops);
+    ops.FillOps(param.call);
     param.call->cq()->Pluck(&ops);
   }
 

@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/call/message.h"
 #include "src/core/ext/transport/chttp2/transport/http2_settings.h"
 #include "src/core/lib/debug/trace_impl.h"
 #include "src/core/lib/slice/slice.h"
@@ -32,7 +33,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-// TODO(tjagtap) TODO(akshitpatel): [PH2][P3] : Write micro benchmarks for
+// TODO(tjagtap) TODO(akshitpatel): [PH2][P4] : Write micro benchmarks for
 // framing code
 
 using grpc_core::http2::Http2ErrorCode;
@@ -222,8 +223,7 @@ class SerializeHeaderAndPayload {
     GRPC_HTTP2_FRAME_DLOG
         << "SerializeHeaderAndPayload Http2DataFrame Type:0 { stream_id:"
         << frame.stream_id << ", end_stream:" << frame.end_stream
-        << ", payload_length:" << frame.payload.Length()
-        << ", payload:" << frame.payload.JoinIntoString() << "}";
+        << ", payload_length:" << frame.payload.Length() << "}";
     auto hdr = extra_bytes_.TakeFirst(kFrameHeaderSize);
     Http2FrameHeader{static_cast<uint32_t>(frame.payload.Length()),
                      static_cast<uint8_t>(FrameType::kData),
@@ -240,8 +240,7 @@ class SerializeHeaderAndPayload {
         << "SerializeHeaderAndPayload Http2HeaderFrame Type:1 { stream_id:"
         << frame.stream_id << ", end_headers:" << frame.end_headers
         << ", end_stream:" << frame.end_stream
-        << ", payload_length:" << frame.payload.Length()
-        << ", payload:" << frame.payload.JoinIntoString() << "}";
+        << ", payload_length:" << frame.payload.Length() << "}";
     auto hdr = extra_bytes_.TakeFirst(kFrameHeaderSize);
     Http2FrameHeader{
         static_cast<uint32_t>(frame.payload.Length()),
@@ -261,7 +260,6 @@ class SerializeHeaderAndPayload {
                           << frame.stream_id
                           << ", end_headers:" << frame.end_headers
                           << ", payload_length:" << frame.payload.Length()
-                          << ", payload:" << frame.payload.JoinIntoString()
                           << "}";
     auto hdr = extra_bytes_.TakeFirst(kFrameHeaderSize);
     Http2FrameHeader{
@@ -652,7 +650,6 @@ ValueOrHttp2Status<Http2Frame> ParseWindowUpdateFrame(
 
 ValueOrHttp2Status<Http2Frame> ParseSecurityFrame(
     const Http2FrameHeader& /*hdr*/, SliceBuffer& payload) {
-  // TODO(tjagtap) : [PH2][P3] : Add validations
   return ValueOrHttp2Status<Http2Frame>(Http2SecurityFrame{std::move(payload)});
 }
 
@@ -727,7 +724,7 @@ SerializeReturn Serialize(absl::Span<Http2Frame> frames, SliceBuffer& out) {
 }
 
 http2::ValueOrHttp2Status<Http2Frame> ParseFramePayload(
-    const Http2FrameHeader& hdr, SliceBuffer payload) {
+    const Http2FrameHeader& hdr, SliceBuffer&& payload) {
   GRPC_CHECK(payload.Length() == hdr.length);
 
   switch (static_cast<FrameType>(hdr.type)) {
@@ -782,30 +779,81 @@ size_t GetFrameMemoryUsage(const Http2Frame& frame) {
 
 ///////////////////////////////////////////////////////////////////////////////
 // GRPC Header
+namespace {
+ValueOrHttp2Status<uint32_t> ParseGrpcMessageFlags(const uint8_t flags) {
+  switch (flags) {
+    case kGrpcMessageHeaderNoFlags:
+      return 0u;
+    case kGrpcMessageHeaderWriteInternalCompress:
+      return GRPC_WRITE_INTERNAL_COMPRESS;
+    default:
+      LOG(ERROR) << "Invalid gRPC header flags: "
+                 << static_cast<uint32_t>(flags);
+      return Http2Status::Http2StreamError(
+          Http2ErrorCode::kInternalError,
+          absl::StrCat("Invalid gRPC header flags: ", flags));
+  }
+}
 
-GrpcMessageHeader ExtractGrpcHeader(SliceBuffer& payload) {
+uint8_t SerializeGrpcMessageFlags(const uint32_t flags) {
+  return (flags & GRPC_WRITE_INTERNAL_COMPRESS)
+             ? kGrpcMessageHeaderWriteInternalCompress
+             : kGrpcMessageHeaderNoFlags;
+}
+}  // namespace
+
+ValueOrHttp2Status<GrpcMessageHeader> ExtractGrpcHeader(SliceBuffer& payload) {
   GRPC_CHECK_GE(payload.Length(), kGrpcHeaderSizeInBytes);
   uint8_t buffer[kGrpcHeaderSizeInBytes];
   payload.CopyFirstNBytesIntoBuffer(kGrpcHeaderSizeInBytes, buffer);
   GrpcMessageHeader header;
-  header.flags = buffer[0];
+  ValueOrHttp2Status<uint32_t> message_flags = ParseGrpcMessageFlags(buffer[0]);
+  if (!message_flags.IsOk()) {
+    return message_flags.TakeStatus(std::move(message_flags));
+  }
+
+  header.flags = message_flags.value();
   header.length = Read4b(buffer + 1);
   return header;
 }
 
-void AppendGrpcHeaderToSliceBuffer(SliceBuffer& payload, const uint8_t flags,
+void AppendGrpcHeaderToSliceBuffer(SliceBuffer& payload, const uint32_t flags,
                                    const uint32_t length) {
   uint8_t* frame_hdr = payload.AddTiny(kGrpcHeaderSizeInBytes);
-  frame_hdr[0] = flags;
+  frame_hdr[0] = SerializeGrpcMessageFlags(flags);
   Write4b(length, frame_hdr + 1);
 }
 
 Http2Status ValidateFrameHeader(const uint32_t max_frame_size_setting,
                                 const bool incoming_header_in_progress,
                                 const uint32_t incoming_header_stream_id,
-                                Http2FrameHeader& current_frame_header,
+                                const Http2FrameHeader& current_frame_header,
                                 const uint32_t last_stream_id,
-                                const bool is_client) {
+                                const bool is_client,
+                                const bool is_first_settings_processed,
+                                Http2FrameCountTracker& tracker,
+                                const uint32_t max_security_frame_size) {
+  const bool is_data_frame =
+      current_frame_header.type == static_cast<uint8_t>(FrameType::kData);
+  const bool is_continuation_frame =
+      current_frame_header.type ==
+      static_cast<uint8_t>(FrameType::kContinuation);
+
+  if (GPR_UNLIKELY(!is_first_settings_processed)) {
+    // This check works only because we pause the read loop after reading the
+    // first SETTINGS frame.
+    const bool is_settings_frame =
+        (current_frame_header.type ==
+             static_cast<uint8_t>(FrameType::kSettings) &&
+         !ExtractFlag(current_frame_header.flags, kFlagAck));
+    if (GPR_UNLIKELY(!is_settings_frame)) {
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kProtocolError,
+          std::string(is_client ? RFC9113::kFirstSettingsFrameClient
+                                : RFC9113::kFirstSettingsFrameServer));
+    }
+  }
+
   if (GPR_UNLIKELY(current_frame_header.length > max_frame_size_setting)) {
     return Http2Status::Http2ConnectionError(
         Http2ErrorCode::kFrameSizeError,
@@ -813,28 +861,127 @@ Http2Status ValidateFrameHeader(const uint32_t max_frame_size_setting,
                      ", Current Size = ", current_frame_header.length,
                      ", Max Size = ", max_frame_size_setting));
   }
-  if (GPR_UNLIKELY(
-          incoming_header_in_progress &&
-          (current_frame_header.type !=
-               static_cast<uint8_t>(FrameType::kContinuation) ||
-           current_frame_header.stream_id != incoming_header_stream_id))) {
+
+  if (GPR_UNLIKELY(current_frame_header.type ==
+                       static_cast<uint8_t>(FrameType::kCustomSecurity) &&
+                   current_frame_header.length > max_security_frame_size)) {
+    return Http2Status::Http2ConnectionError(
+        Http2ErrorCode::kFrameSizeError,
+        absl::StrCat(GrpcErrors::kSecurityFrameTooLarge,
+                     max_security_frame_size,
+                     ", Received size : ", current_frame_header.length));
+  }
+
+  // RFC 9113 (Section 6.10) requires that if a HEADERS frame does not have
+  // END_HEADERS set, it must be followed by a contiguous sequence of
+  // CONTINUATION frames for the same stream, ending with END_HEADERS. No other
+  // frame types or frames for other streams may be interleaved during this
+  // sequence.
+  const bool did_frame_violate_header_block_sequence =
+      (incoming_header_in_progress &&
+       (!is_continuation_frame ||
+        current_frame_header.stream_id != incoming_header_stream_id));
+  const bool did_receive_unexpected_continuation_frame =
+      (!incoming_header_in_progress && is_continuation_frame);
+  if (GPR_UNLIKELY(did_frame_violate_header_block_sequence ||
+                   did_receive_unexpected_continuation_frame)) {
     return Http2Status::Http2ConnectionError(
         Http2ErrorCode::kProtocolError,
         std::string(RFC9113::kAssemblerContiguousSequenceError));
   }
-
   // If a frame is received with a stream id larger than the last stream id sent
   // by the transport, it is a protocol error. This condition holds for clients
   // as in gRPC only clients can initiate a stream. last_stream_id is the stream
   // id of the last stream created by the transport. If no streams were created
   // by the transport, last_stream_id is 0.
-  // TODO(akshitpatel) : [PH2][P3] : Revisit this for server.
-  if (is_client && current_frame_header.stream_id > last_stream_id) {
-    return Http2Status::Http2ConnectionError(
-        Http2ErrorCode::kProtocolError, std::string(RFC9113::kUnknownStreamId));
+  if (GPR_UNLIKELY(current_frame_header.stream_id > last_stream_id)) {
+    const bool is_metadata_frame =
+        current_frame_header.type == static_cast<uint8_t>(FrameType::kHeader) ||
+        is_continuation_frame;
+    if (GPR_UNLIKELY(is_client)) {
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kProtocolError,
+          std::string(RFC9113::kUnknownStreamId));
+    } else if (GPR_UNLIKELY(!is_metadata_frame)) {
+      // For servers, if the stream id is not known, it means the Headers have
+      // not been received for this stream yet. This means that the stream is
+      // still in idle state. A stream in idle state cannot receive any frames
+      // other than HEADERS or PRIORITY.
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kProtocolError,
+          std::string(RFC9113::kIdleStreamError));
+    }
   }
+
+  if (GPR_UNLIKELY(is_continuation_frame && current_frame_header.length == 0u &&
+                   (current_frame_header.flags & kFlagEndHeaders) == 0u)) {
+    tracker.noop_continuation_frames++;
+    if (GPR_UNLIKELY(tracker.noop_continuation_frames >=
+                     kMaxNoopContinuationFrames)) {
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kInternalError,
+          std::string(GrpcErrors::kTooManyZeroLengthContinuationFrames));
+    }
+  }
+
+  if (GPR_UNLIKELY(is_data_frame && current_frame_header.length == 0u &&
+                   (current_frame_header.flags & kFlagEndStream) == 0u)) {
+    tracker.noop_data_frames++;
+    if (GPR_UNLIKELY(tracker.noop_data_frames >= kMaxNoopDataFrames)) {
+      return Http2Status::Http2ConnectionError(
+          Http2ErrorCode::kInternalError,
+          std::string(GrpcErrors::kTooManyZeroLengthDataFrames));
+    }
+  }
+
   // TODO(tjagtap) : [PH2][P2]:Consider validating MAX_CONCURRENT_STREAMS here
+  // for server.
   return Http2Status::Ok();
 }
-
 }  // namespace grpc_core
+
+/*
+A note on Security Frames
+
+Security Frame is a custom frame defined by gRPC.
+
+SECURITY Frame
+
+   The SECURITY frame (type=200) is used to transmit out-of-band security and
+   transport-level privacy information between peers.
+
+   Both peers MUST agree to allow SECURITY frames.
+
+    +------------------------+
+    |     Payload Length     |
+    |          (24)          |
+    +--------+--------+------+
+    |  Type  | Flags  |
+    |  (200) |  (8)   |
+    +-+------+--------+---------------+
+    |R|       Stream Identifier       |
+    | |             (31)              |
+    +=+===============================+
+    |      Security Payload (*)     ...
+    +---------------------------------+
+
+   The SECURITY frame payload contains opaque data intended for the registered
+   transport framing endpoint extension.
+
+   The SECURITY frame does not define flags.
+
+Payload Size Limits and Chunking
+
+   The current implementation of the SECURITY frame has a HARD limit of 16,384
+   bytes (16 KB) for its payload.
+
+   This strict 16 KB limit is enforced because 16,384 bytes is the minimum
+   valid value for SETTINGS_MAX_FRAME_SIZE (the smallest maximum frame size an
+   HTTP/2 peer is allowed to advertise). Currently, the SECURITY frame does not
+   support chunking. Therefore, if a peer attempts to send a SECURITY payload
+   larger than the receiver's advertised SETTINGS_MAX_FRAME_SIZE, the endpoint
+   MUST treat this as a CONNECTION ERROR of type FRAME_SIZE_ERROR. By enforcing
+a hard 16 KB upper bound, we guarantee that the frame will safely fit within any
+compliant peer's single-frame receive buffer without requiring payload chunking.
+
+*/

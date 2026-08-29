@@ -27,6 +27,7 @@
 #include "src/core/lib/slice/slice.h"
 #include "src/core/telemetry/call_tracer.h"
 #include "src/core/telemetry/instrument.h"
+#include "src/core/util/grpc_check.h"
 #include "src/core/util/no_destruct.h"
 #include "src/core/util/sync.h"
 #include "src/core/util/time.h"
@@ -38,6 +39,10 @@
 namespace grpc_core {
 
 constexpr absl::string_view kMetricLabelTarget = "grpc.target";
+constexpr absl::string_view kMetricLabelTelemetry = "grpc.client.call.custom";
+constexpr absl::string_view kMetricLabelBackendService =
+    "grpc.lb.backend_service";
+constexpr absl::string_view kMetricLabelLocality = "grpc.lb.locality";
 
 // A global registry of instruments(metrics). This API is designed to be used
 // to register instruments (Counter, Histogram, and Gauge) as part of program
@@ -307,6 +312,7 @@ class StatsPlugin {
   // instrument storage objects for the instrument domains, and partitions
   // the instrument collection so that different stats plugins only see the
   // subset of metrics they're allowed to see.
+  // The returned scope must be a root scope (i.e. have no parents).
   virtual RefCountedPtr<CollectionScope> GetCollectionScope() const = 0;
 
   // Adds \a value to the uint64 counter specified by \a handle. \a label_values
@@ -325,6 +331,7 @@ class StatsPlugin {
       GlobalInstrumentsRegistry::GlobalInstrumentHandle handle, double value,
       absl::Span<const absl::string_view> label_values,
       absl::Span<const absl::string_view> optional_label_values) = 0;
+
   // Records a uint64 \a value to the histogram specified by \a handle. \a
   // label_values and \a optional_label_values specify attributes that are
   // associated with this measurement and must match with their corresponding
@@ -395,9 +402,11 @@ class GlobalStatsPluginRegistry {
     // Finish construction: must be called after all plugins have been added.
     void Finish() {
       std::vector<RefCountedPtr<CollectionScope>> collection_scopes;
-      collection_scopes.reserve(plugins_state_.size());
+      collection_scopes.reserve(plugins_state_.size() + 1);
+      collection_scopes.push_back(GlobalCollectionScope());
       for (auto& state : plugins_state_) {
         if (auto scope = state.plugin->GetCollectionScope(); scope != nullptr) {
+          GRPC_DCHECK(scope->IsRoot());
           collection_scopes.push_back(scope);
         }
       }

@@ -36,9 +36,9 @@
 #include "src/core/client_channel/client_channel_factory.h"
 #include "src/core/client_channel/config_selector.h"
 #include "src/core/client_channel/dynamic_filters.h"
+#include "src/core/client_channel/retry_throttle.h"
 #include "src/core/client_channel/subchannel.h"
 #include "src/core/client_channel/subchannel_pool_interface.h"
-#include "src/core/filter/blackboard.h"
 #include "src/core/lib/channel/channel_args.h"
 #include "src/core/lib/channel/channel_fwd.h"
 #include "src/core/lib/channel/channel_stack.h"
@@ -276,8 +276,6 @@ class ClientChannelFilter final {
   RefCountedPtr<ServiceConfig> service_config_ ABSL_GUARDED_BY(resolution_mu_);
   RefCountedPtr<ConfigSelector> config_selector_
       ABSL_GUARDED_BY(resolution_mu_);
-  RefCountedPtr<DynamicFilters> dynamic_filters_
-      ABSL_GUARDED_BY(resolution_mu_);
 
   //
   // Fields related to LB picks.  Guarded by lb_mu_.
@@ -302,7 +300,7 @@ class ClientChannelFilter final {
       ABSL_GUARDED_BY(*work_serializer_);
   RefCountedPtr<ConfigSelector> saved_config_selector_
       ABSL_GUARDED_BY(*work_serializer_);
-  RefCountedPtr<const Blackboard> blackboard_
+  RetryThrottlerChannelArgsUpdater retry_throttler_updater_
       ABSL_GUARDED_BY(*work_serializer_);
   OrphanablePtr<LoadBalancingPolicy> lb_policy_
       ABSL_GUARDED_BY(*work_serializer_);
@@ -369,7 +367,7 @@ class ClientChannelFilter::LoadBalancedCall final
   void RetryPickLocked()
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(&ClientChannelFilter::lb_mu_);
 
-  RefCountedPtr<SubchannelCall> subchannel_call() const {
+  RefCountedPtr<Subchannel::Call> subchannel_call() const {
     return subchannel_call_;
   }
 
@@ -423,7 +421,7 @@ class ClientChannelFilter::LoadBalancedCall final
   // and when it is queued and the channel gets a new picker.
   void TryPick(bool was_queued);
 
-  void CreateSubchannelCall();
+  void StartSubchannelCall();
 
   ClientChannelFilter* chand_;
   // When we start a new attempt for a call, we might not have cleaned up the
@@ -443,7 +441,6 @@ class ClientChannelFilter::LoadBalancedCall final
 
   absl::AnyInvocable<void()> on_commit_;
 
-  RefCountedPtr<ConnectedSubchannel> connected_subchannel_;
   const BackendMetricData* backend_metric_data_ = nullptr;
   std::unique_ptr<LoadBalancingPolicy::SubchannelCallTrackerInterface>
       lb_subchannel_call_tracker_;
@@ -453,13 +450,13 @@ class ClientChannelFilter::LoadBalancedCall final
   // Set when we get a cancel_stream op.
   grpc_error_handle cancel_error_;
 
-  // Set when we fail inside the LB call.
-  grpc_error_handle failure_error_;
+  // Set when the LB picker returns a drop result.
+  bool is_drop_ = false;
 
   LbQueuedCallCanceller* lb_call_canceller_
       ABSL_GUARDED_BY(&ClientChannelFilter::lb_mu_) = nullptr;
 
-  RefCountedPtr<SubchannelCall> subchannel_call_;
+  RefCountedPtr<Subchannel::Call> subchannel_call_;
 
   // For intercepting recv_initial_metadata_ready.
   grpc_metadata_batch* recv_initial_metadata_ = nullptr;

@@ -23,9 +23,11 @@ cd "$BASEDIR";
 
 # unit-tests setup starts from here
 function maybe_run_command () {
+  local dir="$1"
+  local cmd="$2"
   # TODO(ssreenithi): find pyproject.toml/nox equivalent
-  if python3 setup.py --help-commands | grep "$1" &>/dev/null; then
-    python3 setup.py "$1";
+  if python3 "${dir}/setup.py" --help-commands | grep "${cmd}" &>/dev/null; then
+    python3 "${dir}/setup.py" "${cmd}";
   fi
 }
 
@@ -45,18 +47,18 @@ pushd src/python/grpcio_observability;
 popd;
 
 # Install xds_protos
-pushd tools/distrib/python/xds_protos;
+pushd py_xds_protos;
   GRPC_PYTHON_BUILD_WITH_CYTHON=1 pip install .
 popd;
 
 # Build and install individual gRPC packages
-pushd src/python;
-  for PACKAGE in ${PACKAGES}; do
-    pushd "${PACKAGE}";
-      python3 setup.py clean;
-      maybe_run_command preprocess
-      maybe_run_command build_package_protos
-      python3 -m pip install .;
-    popd;
-  done
-popd;
+for PACKAGE in ${PACKAGES}; do
+  PACKAGE_PATH="src/python/${PACKAGE}"
+
+  maybe_run_command "${PACKAGE_PATH}" preprocess
+  maybe_run_command "${PACKAGE_PATH}" build_package_protos
+
+  pushd "${PACKAGE_PATH}"
+    python3 -m pip install --no-build-isolation .
+  popd
+done

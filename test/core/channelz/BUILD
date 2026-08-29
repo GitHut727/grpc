@@ -15,7 +15,13 @@
 load("//bazel:grpc_build_system.bzl", "grpc_cc_test", "grpc_package")
 load("//test/core/test_util:grpc_fuzzer.bzl", "grpc_fuzz_test")
 
-grpc_package(name = "test/core/channelz")
+grpc_package(
+    name = "test/core/channelz",
+    features = [
+        "layering_check",
+        "parse_headers",
+    ],
+)
 
 licenses(["notice"])
 
@@ -55,7 +61,6 @@ grpc_cc_test(
     external_deps = [
         "gtest",
         "gtest_main",
-        "@com_google_protobuf//upb/mem",
         "absl/container:flat_hash_map",
         "absl/log",
         "absl/log:check",
@@ -69,6 +74,7 @@ grpc_cc_test(
         "//src/core:json_writer",
         "//src/core:upb_utils",
         "@com_google_protobuf//:duration_upb_proto",
+        "@com_google_protobuf//upb/mem",
     ],
 )
 
@@ -79,7 +85,6 @@ grpc_cc_test(
         "gtest",
         "absl/status",
         "absl/status:statusor",
-        "@com_google_protobuf//upb/mem",
     ],
     tags = [
         # b/117517566.
@@ -113,6 +118,7 @@ grpc_cc_test(
         "//test/core/event_engine:event_engine_test_utils",
         "//test/core/test_util:grpc_test_util",
         "//test/cpp/util:channel_trace_proto_helper",
+        "@com_google_protobuf//upb/mem",
     ],
 )
 
